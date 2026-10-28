@@ -10,7 +10,7 @@ extern "C" {
 #include "main.h"
 
 #ifndef TM1934_LED_COUNT
-#define TM1934_LED_COUNT 8U
+#define TM1934_LED_COUNT 9U
 #endif
 
 void TM1934_Init(void);

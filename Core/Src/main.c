@@ -40,6 +40,15 @@
 #define LED1_FRAME_MS 20U
 #define LED1_CHASE_STEP_MS 80U
 #define LED1_CHASE_TAIL 4U
+
+#define LED_ALERT_LED1_INDEX  0U   /* 第 1 个灯 */
+#define LED_ALERT_LED2_INDEX  1U   /* 第 2 个灯 */
+#define LED_ALERT_LED6_INDEX  5U   /* 第 6 个灯 */
+#define LED_ALERT_DURATION_MS 5000U
+#define LED_ALERT_BLINK_MS    250U
+#define LED_ALERT_R           0U   /* 天蓝色 */
+#define LED_ALERT_G           191U
+#define LED_ALERT_B           255U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,7 +59,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static volatile uint8_t  alert_active = 0U;
+static volatile uint32_t alert_start_tick = 0U;
+static volatile uint32_t alert_end_tick = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -166,6 +177,16 @@ static void LED1_Running(uint32_t tick)
 
   TM1934_Show();
 }
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_8)
+  {
+    alert_start_tick = HAL_GetTick();
+    alert_end_tick = alert_start_tick + LED_ALERT_DURATION_MS;
+    alert_active = 1U;
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -211,13 +232,32 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t tick = HAL_GetTick();
 
-    if (((tick / LED1_EFFECT_PERIOD_MS) & 1U) == 0U)
+    if ((alert_active != 0U) && ((int32_t)(tick - alert_end_tick) >= 0))
     {
-      LED1_Gradient(tick);
+      alert_active = 0U;
+    }
+
+    if (alert_active != 0U)
+    {
+      TM1934_Clear();
+      if ((((tick - alert_start_tick) / LED_ALERT_BLINK_MS) & 1U) == 0U)
+      {
+        TM1934_SetPixel(LED_ALERT_LED1_INDEX, LED_ALERT_R, LED_ALERT_G, LED_ALERT_B);
+        TM1934_SetPixel(LED_ALERT_LED2_INDEX, LED_ALERT_R, LED_ALERT_G, LED_ALERT_B);
+        TM1934_SetPixel(LED_ALERT_LED6_INDEX, LED_ALERT_R, LED_ALERT_G, LED_ALERT_B);
+      }
+      TM1934_Show();
     }
     else
     {
-      LED1_Running(tick);
+      if (((tick / LED1_EFFECT_PERIOD_MS) & 1U) == 0U)
+      {
+        LED1_Gradient(tick);
+      }
+      else
+      {
+        LED1_Running(tick);
+      }
     }
 
     HAL_Delay(LED1_FRAME_MS);
