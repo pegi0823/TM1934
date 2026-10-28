@@ -208,10 +208,11 @@ void DMA1_Channel1_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles EXTI line[9:5] interrupts (PE8 = INT12).
+  * @brief This function handles EXTI line[9:5] interrupts (PE7 = INT11, PE8 = INT12).
   */
 void EXTI9_5_IRQHandler(void)
 {
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_8);
 }
 

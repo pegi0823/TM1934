@@ -49,6 +49,13 @@
 #define LED_ALERT_R           0U   /* 天蓝色 */
 #define LED_ALERT_G           191U
 #define LED_ALERT_B           255U
+
+#define LED_CHASE_FIRST_INDEX 0U   /* 第 1 个灯 */
+#define LED_CHASE_LAST_INDEX  9U   /* 第 9 个灯 */
+#define LED_CHASE_STEP_MS     100U
+#define LED_CHASE_R           255U
+#define LED_CHASE_G           255U
+#define LED_CHASE_B           255U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,6 +69,8 @@
 static volatile uint8_t  alert_active = 0U;
 static volatile uint32_t alert_start_tick = 0U;
 static volatile uint32_t alert_end_tick = 0U;
+static volatile uint8_t  chase_active = 0U;
+static volatile uint32_t chase_start_tick = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -180,11 +189,18 @@ static void LED1_Running(uint32_t tick)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_8)
+  if (GPIO_Pin == GPIO_PIN_8)          /* INT12: 第1/2/6颗灯闪烁天蓝色5秒 */
   {
     alert_start_tick = HAL_GetTick();
     alert_end_tick = alert_start_tick + LED_ALERT_DURATION_MS;
     alert_active = 1U;
+    chase_active = 0U;
+  }
+  else if (GPIO_Pin == GPIO_PIN_7)     /* INT11: 流水灯 第1 → 第8 */
+  {
+    chase_start_tick = HAL_GetTick();
+    chase_active = 1U;
+    alert_active = 0U;
   }
 }
 /* USER CODE END 0 */
@@ -237,6 +253,12 @@ int main(void)
       alert_active = 0U;
     }
 
+    if ((chase_active != 0U) &&
+        (((tick - chase_start_tick) / LED_CHASE_STEP_MS) > (LED_CHASE_LAST_INDEX - LED_CHASE_FIRST_INDEX)))
+    {
+      chase_active = 0U;
+    }
+
     if (alert_active != 0U)
     {
       TM1934_Clear();
@@ -246,6 +268,13 @@ int main(void)
         TM1934_SetPixel(LED_ALERT_LED2_INDEX, LED_ALERT_R, LED_ALERT_G, LED_ALERT_B);
         TM1934_SetPixel(LED_ALERT_LED6_INDEX, LED_ALERT_R, LED_ALERT_G, LED_ALERT_B);
       }
+      TM1934_Show();
+    }
+    else if (chase_active != 0U)
+    {
+      uint16_t index = (uint16_t)(LED_CHASE_FIRST_INDEX + ((tick - chase_start_tick) / LED_CHASE_STEP_MS));
+      TM1934_Clear();
+      TM1934_SetPixel(index, LED_CHASE_R, LED_CHASE_G, LED_CHASE_B);
       TM1934_Show();
     }
     else

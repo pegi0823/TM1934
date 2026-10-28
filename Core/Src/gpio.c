@@ -48,13 +48,13 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
 
-  /* PE8 = INT12 input: active low, falling-edge trigger, pull-up */
-  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  /* PE7 = INT11, PE8 = INT12: inputs, active low, falling-edge trigger, pull-up */
+  GPIO_InitStruct.Pin = GPIO_PIN_7 | GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /* EXTI line 8 shares the EXTI9_5 interrupt */
+  /* EXTI lines 7 and 8 share the EXTI9_5 interrupt */
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 }
