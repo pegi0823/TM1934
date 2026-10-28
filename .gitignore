@@ -1,0 +1,25 @@
+# Archives
+*.zip
+*.rar
+
+# Keil MDK build outputs (regenerated on build)
+*.o
+*.crf
+*.d
+*.axf
+*.hex
+*.map
+*.htm
+*.lnp
+*.dep
+*.lst
+*.sct
+*.uvguix.*
+*.build_log.htm
+
+# Keil debug / RTE generated
+DebugConfig/
+RTE/
+
+# IDE / user-specific
+.vscode/

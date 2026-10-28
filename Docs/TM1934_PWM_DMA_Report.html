@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>TM1934 PWM+DMA 驱动学习报告</title>
+<style>
+  @page { size: A4; margin: 20mm 16mm; }
+  body {
+    font-family: "Microsoft YaHei", "SimSun", sans-serif;
+    font-size: 11pt;
+    line-height: 1.7;
+    color: #222;
+    max-width: 190mm;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  h1 { font-size: 22pt; text-align: center; margin: 0 0 4px; color: #0b3d91; }
+  h2 { font-size: 15pt; color: #0b3d91; border-bottom: 2px solid #0b3d91; padding-bottom: 4px; margin-top: 26px; }
+  h3 { font-size: 12.5pt; color: #1a5fb4; margin-top: 18px; }
+  .subtitle { text-align: center; color: #555; font-size: 12pt; margin-bottom: 20px; }
+  .meta { text-align: center; color: #666; font-size: 9.5pt; margin-bottom: 24px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 16px; font-size: 9.5pt; }
+  th, td { border: 1px solid #b9c6da; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #e8eef7; color: #0b3d91; font-weight: bold; }
+  code { font-family: "Consolas","Courier New",monospace; background:#f2f4f8; padding:1px 5px; border-radius:3px; font-size:9.5pt; color:#a31515; }
+  pre { font-family:"Consolas","Courier New",monospace; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:12px 14px; font-size:9pt; line-height:1.45; overflow-x:auto; white-space:pre; color:#24292f; }
+  .note { background:#fff8e1; border-left:4px solid #f0b429; padding:8px 12px; margin:12px 0; font-size:10pt; }
+  .warn { background:#fdecea; border-left:4px solid #e53935; padding:8px 12px; margin:12px 0; font-size:10pt; }
+  .ok { background:#e8f5e9; border-left:4px solid #43a047; padding:8px 12px; margin:12px 0; font-size:10pt; }
+  ul, ol { margin:6px 0 12px; padding-left:24px; }
+  li { margin:3px 0; }
+  .k { color:#0b3d91; font-weight:bold; }
+  .toc { background:#f7f9fc; border:1px solid #d0d7de; border-radius:6px; padding:12px 20px; margin:16px 0; }
+  .highlight { background:#fff3cd; border:2px solid #f0b429; border-radius:8px; padding:14px 16px; margin:14px 0; }
+  .step { border-left:3px solid #1a5fb4; padding-left:12px; margin:10px 0; }
+  .step .stitle { font-weight:bold; color:#0b3d91; }
+  .rootcause { color:#c62828; font-weight:bold; }
+  .fixed { color:#2e7d32; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<h1>TM1934 单线 RGB LED 驱动 · PWM+DMA 学习报告</h1>
+<p class="subtitle">重点：PWM+DMA “灯不亮”问题的排查与定位全过程</p>
+<p class="meta">工程：C:\Users\Administrator\Desktop\STM32G431\TM1934 ｜ 关键引脚：PA0→74HC245→TM1934 DIN，PF2→74HC245 DIR ｜ 整理日期：2026-10-28</p>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li>项目目标与硬件环境</li>
+  <li>硬件连接与信号路径</li>
+  <li>TM1934 单线协议原理</li>
+  <li>PWM+DMA 驱动原理</li>
+  <li><b>重点：PWM+DMA “灯不亮”问题排查全过程</b></li>
+  <li>关键时序计算</li>
+  <li>函数使用详解</li>
+  <li>学习方法与调试思路</li>
+  <li>附录：关键代码与参数速查</li>
+</ol>
+</div>
+
+<h2>1. 项目目标与硬件环境</h2>
+<p>目标：在 STM32G431VBT6 上用 <b>PWM + DMA</b> 的方式驱动 TM1934 级联 RGB 灯带（8 颗），实现无 CPU 干预的位流发送，并在此之上实现渐变、流水等动画。</p>
+<table>
+  <tr><th>项目</th><th>参数 / 说明</th></tr>
+  <tr><td>主控</td><td>STM32G431VBT6（LQFP100，Cortex-M4F，最高 170 MHz）</td></tr>
+  <tr><td>外部晶振 HSE</td><td>8 MHz</td></tr>
+  <tr><td>系统时钟 SYSCLK</td><td>170 MHz（PLLM=2 / PLLN=85 / PLLR=2）</td></tr>
+  <tr><td>定时器</td><td>TIM2（32 位通用定时器），CH1 输出 PWM</td></tr>
+  <tr><td>DMA</td><td>DMA1_Channel1 + DMAMUX1，由 TIM2 更新事件（Update）触发</td></tr>
+  <tr><td>数据引脚</td><td>PA0（TIM2_CH1，AF1）</td></tr>
+  <tr><td>方向引脚</td><td>PF2（74HC245 的 DIR，输出高电平）</td></tr>
+  <tr><td>灯带</td><td>TM1934 × 8，单线级联，RGB 恒流驱动</td></tr>
+</table>
+
+<h2>2. 硬件连接与信号路径</h2>
+<p>PA0 不是直接连 TM1934，而是经过一片 74HC245 缓冲器：</p>
+<pre>STM32 PA0 ──► 74HC245 A1 ──► B1 ──► J14.1 (LED1) ──► TM1934 DIN
+STM32 PF2 ──► 74HC245 DIR</pre>
+<ul>
+  <li><code>DIR = 1</code>：数据由 A 端流向 B 端，即 MCU → 灯板。因此 <code>PF2</code> 必须输出<b>高电平</b>，否则数据到不了 TM1934。这一步在 <code>TM1934_Init()</code> 中完成。</li>
+  <li>74HC245 的 <code>OE</code> 接 GND（输出始终使能）。</li>
+  <li>数据线空闲时应保持<b>低电平</b>；PWM 在复位段输出全 0，保证空闲低电平。</li>
+  <li>MCU、74HC245、灯板必须共地；若 MCU 为 3.3 V 而缓冲器为 5 V，需确认缓冲器为 HCT 类（输入高阈值约 2 V），否则 3.3 V 可能无法可靠被识别。</li>
+</ul>
+
+<h2>3. TM1934 单线协议原理</h2>
+<h3>3.1 位编码：高电平宽度区分 0 / 1</h3>
+<p>每个 bit 周期约 1.25 µs（800 kHz），通过<b>高电平持续时间</b>区分 0 和 1：</p>
+<table>
+  <tr><th>参数</th><th>含义</th><th>最小值</th><th>典型值</th><th>最大值</th></tr>
+  <tr><td>T0H</td><td>0 码高电平时间</td><td>310 ns</td><td>360 ns</td><td>410 ns</td></tr>
+  <tr><td>T1H</td><td>1 码高电平时间</td><td>650 ns</td><td>720 ns</td><td>1000 ns</td></tr>
+  <tr><td>T0/T1</td><td>单个 bit 周期</td><td>1.25 µs</td><td>1.25 µs</td><td>2.5 µs</td></tr>
+  <tr><td>Treset</td><td>复位低电平时间</td><td>200 µs</td><td>—</td><td>—</td></tr>
+</table>
+<h3>3.2 数据帧结构</h3>
+<p>每颗芯片 24 bit，内部顺序 <b>R → G → B</b>，每个字节 <b>MSB 先发</b>：</p>
+<pre>R7 R6 ... R0   G7 ... G0   B7 ... B0     ← 每颗 TM1934 共 24 bit</pre>
+<p>一帧 = 若干颗的 24 bit 数据 + 一个复位（低电平 &gt; 200 µs）。复位后芯片才把收到的数据解码输出。</p>
+
+<h2>4. PWM+DMA 驱动原理</h2>
+<p>与 GPIO 位带（bit-bang，CPU 忙等产生精确时序）不同，本工程用定时器的 PWM 外设 + DMA 自动输出位流，CPU 只在发送前后做一次启动/停止，其余时间不参与。</p>
+<h3>4.1 基本原理</h3>
+<ul>
+  <li>定时器 TIM2 配置为 PWM1 模式，周期 212 个计数（≈1.247 µs），正好是 TM1934 一个 bit 的周期。</li>
+  <li>每个 bit 用一个比较值 <code>CCR1</code> 表示：<b>0 码</b>写 <code>T0H=61</code>（高电平 359 ns），<b>1 码</b>写 <code>T1H=122</code>（高电平 718 ns），复位写 <code>0</code>（整周期低电平）。</li>
+  <li>把整帧换算成比较值数组 <code>pwm_buffer[]</code>，交给 DMA，DMA 每个定时器<b>更新事件</b>向 <code>CCR1</code> 搬一个值，实现位流的自动、连续、精确输出。</li>
+  <li>CCR1 使能预装载（Preload）：DMA 写入的值在下一个更新事件才生效，形成“提前一拍”的流水，避免同一周期内改值导致毛刺。</li>
+</ul>
+<h3>4.2 为什么用更新事件而不是比较事件触发 DMA</h3>
+<p>STM32 的 <code>HAL_TIM_PWM_Start_DMA()</code> 默认用通道的<b>比较事件（CCxDE）</b>触发 DMA。当 <code>CCR=0</code>（复位码）时，比较事件与更新事件同时发生，容易丢失触发、导致整帧错位。改用<b>更新事件（UDE，请求号 <code>DMA_REQUEST_TIM2_UP</code>）</b>触发，每个周期稳定地搬一个值，这是驱动此类 LED 的推荐做法。</p>
+<h3>4.3 为什么 DMA 用 32 位（WORD）对齐</h3>
+<p>TIM2 是 <b>32 位定时器</b>，其 <code>CCR1</code> 是 32 位寄存器。DMA 的源（内存缓冲）与目的（CCR1）都必须配成 <code>WORD</code>（32 位），缓冲用 <code>uint32_t</code>。若误配 16 位（HALFWORD），对 32 位定时器会导致写入不匹配、PWM 无法正确输出。</p>
+
+<h2>5. 重点：PWM+DMA “灯不亮”问题排查全过程</h2>
+<p>这是本次学习最有价值的部分。现象是：<b>同一个硬件、同一个灯带，GPIO 位带工程（TM1934_01）正常，改成 PWM+DMA 后灯完全不亮</b>。下面按实际排查顺序，记录每个假设、验证与结论。</p>
+
+<h3>5.1 问题背景与定位前提</h3>
+<ul>
+  <li>先确认硬件没问题：接线正确，参考工程能点亮，说明信号路径（PA0→74HC245→TM1934）、供电、电平都正常。</li>
+  <li>因此问题锁定在<b>软件驱动层</b>——从 GPIO 位带改成 PWM+DMA 时引入的若干错误。</li>
+  <li>排查策略：<b>把“协议对不对”和“新驱动写没写对”分开</b>，逐个假设验证，不盲改。</li>
+</ul>
+
+<h3>5.2 排查步骤与根因（按时间顺序）</h3>
+
+<div class="step">
+  <p class="stitle">① 缓冲区越界 —— 最隐蔽的“直接崩溃”</p>
+  <p>代码里复位段写 <code>25000</code> 个 0，但 <code>pwm_buffer</code> 只开了 <code>(N×24)+5000</code> 个元素。8 颗灯时实际写入 25024 个元素，越界写穿 SRAM，可能直接触发 HardFault，灯自然不亮。</p>
+  <p><span class="rootcause">根因</span>：缓冲长度与写入长度不匹配。</p>
+  <p><span class="fixed">修正</span>：定义 <code>TM1934_RESET_COUNT 300</code>，缓冲大小与复位循环都用它，保证不越界。</p>
+</div>
+
+<div class="step">
+  <p class="stitle">② 时序取值贴着下限 —— 边缘性失败</p>
+  <p>原 <code>T0H=53</code> 只有约 312 ns，几乎贴着手册 310 ns 下限。经 74HC245 缓冲、走线后，高电平很容易跌破下限，导致 0 码被判错，整帧乱码。</p>
+  <p><span class="rootcause">根因</span>：时序参数取临界值，无裕量。</p>
+  <p><span class="fixed">修正</span>：改用典型值 <code>T0H=61</code>（≈359 ns）、<code>T1H=122</code>（≈718 ns）。</p>
+</div>
+
+<div class="step">
+  <p class="stitle">③ DMA 触发源错误 —— 复位码触发不可靠</p>
+  <p>原用 <code>HAL_TIM_PWM_Start_DMA()</code>，它用通道<b>比较事件（CCxDE）</b>触发 DMA。当 <code>CCR=0</code>（复位码）时，比较事件与更新事件同时发生，DMA 触发不可靠，导致整帧错位。ST 官方也明确指出该方式对接近 0 或 ARR 的值不适用。</p>
+  <p><span class="rootcause">根因</span>：触发事件与请求号不匹配。</p>
+  <p><span class="fixed">修正</span>：改用<b>更新事件（UDE）</b>触发，请求号 <code>DMA_REQUEST_TIM2_UP</code>，手动启动 DMA。</p>
+</div>
+
+<div class="step">
+  <p class="stitle">④ LED 数量不符 —— 数据包数量不对</p>
+  <p>参考工程 <code>TM1934_LED_COUNT = 8</code>，而 PWM+DMA 工程是 <code>1</code>。只发了 1 颗的数据，其余灯收不到数据。</p>
+  <p><span class="rootcause">根因</span>：级联数量配置与实际颗数不符。</p>
+  <p><span class="fixed">修正</span>：改回 <code>8U</code>。</p>
+</div>
+
+<div class="step">
+  <p class="stitle">⑤ DMA 数据位宽错误 —— 最终修好的关键点</p>
+  <p>TIM2 是 <b>32 位定时器</b>，其 <code>CCR1</code> 是 32 位寄存器，但 DMA 配成了 16 位（<code>HALFWORD</code>）对齐、缓冲用 <code>uint16_t</code>。位宽不匹配导致 PWM 无法正确输出。</p>
+  <p><span class="rootcause">根因</span>：定时器位宽与 DMA 位宽不匹配（这是 32 位定时器最容易被忽略的坑）。</p>
+  <p><span class="fixed">修正</span>：改为 <code>WORD</code>（32 位）对齐，缓冲 <code>uint32_t</code>。改完编译烧录后，灯带<b>全亮</b>。</p>
+</div>
+
+<div class="highlight">
+  <b>核心结论（一句话）：</b>PWM+DMA “不亮”，往往是多个“不匹配”叠加而成——<b>缓冲长度 vs 写入长度、时序取值 vs 手册范围、触发事件 vs 请求号、定时器位宽 vs DMA 位宽、LED 数量 vs 实际颗数</b>。任何一个不匹配都可能让灯完全不亮，必须逐项排除。
+</div>
+
+<h3>5.3 根因汇总表</h3>
+<table>
+  <tr><th>#</th><th>现象</th><th>根因</th><th>修正</th></tr>
+  <tr><td>1</td><td>灯完全不亮（可能死机）</td><td>复位循环写 25000 个 0，缓冲只开 5000，越界写穿 SRAM</td><td><code>TM1934_RESET_COUNT 300</code>，缓冲与写入长度一致</td></tr>
+  <tr><td>2</td><td>不亮 / 颜色乱</td><td>T0H=53（≈312 ns）贴下限 310 ns</td><td>改 61（≈359 ns，取典型值）</td></tr>
+  <tr><td>3</td><td>不亮 / 闪烁 / 错位</td><td>DMA 用比较事件（CCxDE）触发，CCR=0 复位时不可靠</td><td>改用更新事件 <code>DMA_REQUEST_TIM2_UP</code> + UDE</td></tr>
+  <tr><td>4</td><td>只亮部分 / 灯带不完整</td><td><code>TM1934_LED_COUNT</code> 被设成 1，实际 8 颗</td><td>改为 <code>8U</code></td></tr>
+  <tr><td>5</td><td>完全不亮</td><td>TIM2 是 32 位定时器，DMA 误配 16 位对齐</td><td>改为 <code>WORD</code>（32 位），缓冲 <code>uint32_t</code></td></tr>
+</table>
+
+<h3>5.4 为什么这些问题“叠加”了还查了很久</h3>
+<ul>
+  <li><b>问题不止一个：</b>从位带改 PWM+DMA 是一次性改了一整层，错误不是单点，而是“溢出 + 临界时序 + 触发源 + 位宽 + 数量”连环出现，修好一个还有一个。</li>
+  <li><b>硬件细节多：</b>32 位 vs 16 位定时器、DMAMUX 请求号、CCR 预装载、更新事件 vs 比较事件，这些不是看一句例程就能全对的。</li>
+  <li><b>“完全不亮”而非“颜色错”：</b>一旦最底层没输出（溢出、位宽错），表现就是全黑，掩盖了上层逻辑其实是对的。</li>
+  <li><b>静态分析有局限：</b>很多问题靠读代码只能“怀疑”，最终要靠示波器看 PA0 有没有 1.25 µs 波形来一锤定音。</li>
+</ul>
+
+<h2>6. 关键时序计算</h2>
+<p>系统主频 170 MHz，定时器不分频（Prescaler=0），每计数 = 1/170 MHz ≈ 5.882 ns。</p>
+<table>
+  <tr><th>项目</th><th>目标</th><th>计数 = 目标 ÷ 5.882 ns</th><th>实际取值</th><th>实际时间</th></tr>
+  <tr><td>T0H</td><td>360 ns</td><td>61.2</td><td>61</td><td>≈ 359 ns</td></tr>
+  <tr><td>T1H</td><td>720 ns</td><td>122.4</td><td>122</td><td>≈ 718 ns</td></tr>
+  <tr><td>周期</td><td>1.25 µs</td><td>212.5</td><td>212（ARR=211）</td><td>≈ 1247 ns</td></tr>
+  <tr><td>复位</td><td>&gt; 200 µs</td><td>—</td><td>300 个 0</td><td>≈ 374 µs</td></tr>
+</table>
+
+<h2>7. 函数使用详解</h2>
+<h3>7.1 应用层 API（<code>tm1934.c / tm1934.h</code>）</h3>
+<table>
+  <tr><th>函数</th><th>作用</th><th>是否立即输出</th></tr>
+  <tr><td><code>TM1934_Init()</code></td><td>配置 PF2 方向为高、清空帧缓存并发送一帧全 0</td><td>是（发送一帧 0）</td></tr>
+  <tr><td><code>TM1934_SetPixel(i, r, g, b)</code></td><td>设置第 i 颗颜色（写帧缓存，含越界保护）</td><td>否</td></tr>
+  <tr><td><code>TM1934_SetAll(r, g, b)</code></td><td>整条灯带设为同一颜色</td><td>否</td></tr>
+  <tr><td><code>TM1934_Clear()</code></td><td>清空帧缓存（全灭）</td><td>否</td></tr>
+  <tr><td><code>TM1934_Show()</code></td><td>把帧缓存换算成 PWM 位流并经 DMA 发送</td><td>是</td></tr>
+</table>
+<h4><code>TM1934_Init()</code></h4>
+<pre>void TM1934_Init(void)
+{
+    // 1. 使能 GPIOF 时钟，PF2 配推挽输出并拉高（74HC245 方向 A→B）
+    __HAL_RCC_GPIOF_CLK_ENABLE();
+    GPIO_InitStruct.Pin   = TM1934_DIR_PIN;     // PF2
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(TM1934_DIR_PORT, &amp;GPIO_InitStruct);
+    HAL_GPIO_WritePin(TM1934_DIR_PORT, TM1934_DIR_PIN, GPIO_PIN_SET);
+
+    // 2. 上电先熄灭：清缓存 + 发一帧全 0
+    TM1934_Clear();
+    TM1934_Show();
+}</pre>
+<h4><code>TM1934_SetPixel() / SetAll() / Clear()</code></h4>
+<p>三者只操作内存帧缓存 <code>tm1934_buffer[N*3]</code>（顺序 R、G、B），不会立即改变灯的状态，必须再调 <code>TM1934_Show()</code> 才生效。</p>
+<pre>void TM1934_SetPixel(uint16_t index, uint8_t red, uint8_t green, uint8_t blue)
+{
+    if (index &gt;= TM1934_LED_COUNT) return;      // 越界保护
+    uint16_t offset = index * 3U;
+    tm1934_buffer[offset]     = red;
+    tm1934_buffer[offset + 1] = green;
+    tm1934_buffer[offset + 2] = blue;
+}</pre>
+<h4><code>TM1934_Show()</code></h4>
+<p>核心发送函数：把 24 bit 数据 + 300 个复位码换算成比较值数组，然后启动 DMA 由更新事件逐个搬进 CCR1。</p>
+<pre>void TM1934_Show(void)
+{
+    uint32_t idx = 0U;
+
+    // 1. 数据 → 比较值：1 码 = T1H，0 码 = T0H，每个字节 MSB 先发
+    for (uint16_t i = 0; i &lt; sizeof(tm1934_buffer); i++) {
+        uint8_t byte = tm1934_buffer[i];
+        for (int8_t bit = 7; bit &gt;= 0; bit--)
+            pwm_buffer[idx++] = (byte &amp; (1U &lt;&lt; bit)) ? TM1934_T1H : TM1934_T0H;
+    }
+
+    // 2. 复位码：300 个 0（约 374 µs 低电平）
+    for (uint32_t r = 0; r &lt; TM1934_RESET_COUNT; r++) pwm_buffer[idx++] = 0U;
+
+    // 3. 停止上一次发送，复位计数器与标志
+    HAL_TIM_PWM_Stop_DMA(&amp;htim2, TIM_CHANNEL_1);
+    __HAL_TIM_DISABLE_DMA(&amp;htim2, TIM_DMA_UPDATE);
+    __HAL_TIM_SET_COUNTER(&amp;htim2, 0);
+    __HAL_TIM_CLEAR_FLAG(&amp;htim2, TIM_FLAG_UPDATE | TIM_FLAG_CC1);
+
+    // 4. 启动 DMA（内存 → CCR1，更新事件触发），再开 UDE、CC1 输出、定时器
+    HAL_DMA_Start_IT(htim2.hdma[TIM_DMA_ID_CC1],
+                     (uint32_t)pwm_buffer, (uint32_t)&amp;htim2.Instance-&gt;CCR1, idx);
+    __HAL_TIM_ENABLE_DMA(&amp;htim2, TIM_DMA_UPDATE);
+    TIM_CCxChannelCmd(htim2.Instance, TIM_CHANNEL_1, TIM_CCx_ENABLE);
+    __HAL_TIM_ENABLE(&amp;htim2);
+}</pre>
+<div class="note"><b>使用要点：</b>不要在中断里调用 <code>TM1934_Show()</code>；刷新频率 20–50 Hz 即可；先 <code>SetPixel/SetAll/Clear</code> 再统一 <code>Show</code>。</div>
+
+<h3>7.2 外设初始化函数（<code>tim.c / dma.c / stm32g4xx_hal_msp.c</code>）</h3>
+<table>
+  <tr><th>函数</th><th>职责</th></tr>
+  <tr><td><code>MX_TIM2_Init()</code></td><td>初始化 TIM2 为 PWM1 模式，ARR=211（周期 212），并调用 <code>HAL_TIM_MspPostInit()</code> 配置 PA0 复用功能</td></tr>
+  <tr><td><code>MX_DMA_Init()</code></td><td>使能 DMA1/DMAMUX1 时钟、配置并打开 DMA1_Channel1 中断</td></tr>
+  <tr><td><code>HAL_TIM_PWM_MspInit()</code></td><td>使能 TIM2 时钟，初始化 DMA 句柄（请求 = TIM2_UP，方向 内存→外设，32 位对齐），并链接到 htim2</td></tr>
+  <tr><td><code>HAL_TIM_MspPostInit()</code></td><td>把 PA0 配成复用推挽 <code>AF1_TIM2</code>，高速</td></tr>
+</table>
+<pre>// HAL_TIM_PWM_MspInit 关键配置
+hdma_tim2_ch1.Instance               = DMA1_Channel1;
+hdma_tim2_ch1.Init.Request           = DMA_REQUEST_TIM2_UP;   // 更新事件触发
+hdma_tim2_ch1.Init.Direction         = DMA_MEMORY_TO_PERIPH;
+hdma_tim2_ch1.Init.PeriphInc         = DMA_PINC_DISABLE;      // CCR1 固定地址
+hdma_tim2_ch1.Init.MemInc            = DMA_MINC_ENABLE;       // 内存递增
+hdma_tim2_ch1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD; // 32 位
+hdma_tim2_ch1.Init.MemDataAlignment    = DMA_MDATAALIGN_WORD; // 32 位
+hdma_tim2_ch1.Init.Mode              = DMA_NORMAL;            // 一次性
+hdma_tim2_ch1.Init.Priority          = DMA_PRIORITY_HIGH;
+HAL_DMA_Init(&amp;hdma_tim2_ch1);
+__HAL_LINKDMA(htim_pwm, hdma[TIM_DMA_ID_CC1], hdma_tim2_ch1);</pre>
+
+<h3>7.3 应用层动画函数（<code>main.c</code>）</h3>
+<table>
+  <tr><th>函数</th><th>作用</th></tr>
+  <tr><td><code>LED1_ColorWheel(pos, brightness, &amp;r, &amp;g, &amp;b)</code></td><td>把 0–255 位置映射成彩虹色并按亮度缩放</td></tr>
+  <tr><td><code>LED1_Gradient(tick)</code></td><td>整条灯带空间渐变 + 时间亮度呼吸（三角波）</td></tr>
+  <tr><td><code>LED1_Running(tick)</code></td><td>带拖尾的流水灯；单颗时退化为颜色循环</td></tr>
+</table>
+<pre>// 主循环：每 8 秒切换一种动画
+uint32_t tick = HAL_GetTick();
+if (((tick / LED1_EFFECT_PERIOD_MS) &amp; 1U) == 0U) LED1_Gradient(tick);
+else                                             LED1_Running(tick);
+HAL_Delay(LED1_FRAME_MS);   // 20 ms 一帧</pre>
+
+<h2>8. 学习方法与调试思路</h2>
+<ol>
+  <li><span class="k">先有可运行参考：</span>从一个可工作的 GPIO 位带工程（<code>TM1934_01</code>）入手，确认硬件连线、供电、时序参数正确，把“协议是否正确”与“新驱动是否写对”两个问题分开。</li>
+  <li><span class="k">读通协议：</span>对照 TM1934 数据手册，明确位编码（T0H/T1H）、数据顺序（RGB、MSB 先发）、复位时间（&gt;200 µs）三大要素。</li>
+  <li><span class="k">理解外设：</span>搞清 PWM 模式如何用 <code>CCR</code> 控制占空比，DMA 如何“每个周期搬一个比较值”，以及预装载带来的“延迟一拍”流水。</li>
+  <li><span class="k">逐步替换：</span>只把发送层从“GPIO 位带”替换成“PWM+DMA”，应用层动画函数保持不变，便于对比排查。</li>
+  <li><span class="k">参数要留裕量：</span>时序取数据手册典型值，而不是贴着最小/最大值；否则经过缓冲器、走线后容易超差。</li>
+  <li><span class="k">用示波器/逻辑分析仪验证：</span>先看 PA0 有没有 1.25 µs 周期的波形，再判断是“没输出”还是“输出但灯不响应”。</li>
+</ol>
+
+<h2>9. 附录：关键代码与参数速查</h2>
+<h3>9.1 参数定义（<code>tm1934.c</code> 顶部）</h3>
+<pre>#define TM1934_DIR_PORT    GPIOF
+#define TM1934_DIR_PIN     GPIO_PIN_2
+
+#define TM1934_T0H         61U     // 0 码高电平 ≈ 359 ns
+#define TM1934_T1H         122U    // 1 码高电平 ≈ 718 ns
+#define TM1934_PERIOD      212U    // 位周期（ARR=211）
+#define TM1934_RESET_COUNT 300U    // 复位 0 的个数 ≈ 374 µs</pre>
+<h3>9.2 级联数量（<code>tm1934.h</code>）</h3>
+<pre>#ifndef TM1934_LED_COUNT
+#define TM1934_LED_COUNT 8U
+#endif</pre>
+<h3>9.3 RAM 与刷新时间估算</h3>
+<table>
+  <tr><th>级联数</th><th>帧缓存</th><th>pwm_buffer（uint32_t）</th><th>单帧数据时间</th></tr>
+  <tr><td>8</td><td>24 B</td><td>(8×24+300)×4 = 1968 B</td><td>192×1.247 µs ≈ 240 µs</td></tr>
+  <tr><td>256</td><td>768 B</td><td>(256×24+300)×4 ≈ 25.8 KB</td><td>6144×1.247 µs ≈ 7.66 ms</td></tr>
+</table>
+<div class="warn"><b>提示：</b>级联数量很大时，pwm_buffer 会占较多 RAM，且每帧发送时间变长。若需驱动上百颗，可进一步优化（如只存位流、缩短复位、或用 SPI 外设映射）。</div>
+
+</body>
+</html>
